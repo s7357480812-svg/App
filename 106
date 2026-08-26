@@ -1,0 +1,253 @@
+import { useState, useEffect, useRef } from 'react';
+import {
+  View, Text, TextInput, Pressable, StyleSheet, ActivityIndicator,
+  KeyboardAvoidingView, Platform, ScrollView, Alert
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as WebBrowser from 'expo-web-browser';
+import * as Linking from 'expo-linking';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Colors, Spacing, Radius } from '@/src/theme';
+import { apiFetch } from '@/src/api';
+import { useAuth } from '@/src/auth';
+
+WebBrowser.maybeCompleteAuthSession();
+
+export default function AuthScreen() {
+  const router = useRouter();
+  const { setSession, user } = useAuth();
+  const [mode, setMode] = useState<'phone' | 'otp'>('phone');
+  const [phone, setPhone] = useState('');
+  const [name, setName] = useState('');
+  const [otp, setOtp] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+  const processedSessionIds = useRef(new Set<string>());
+  const linkListenerUrl = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (user) router.replace('/(tabs)/home');
+  }, [user, router]);
+
+  // Register URL listener before opening auth session
+  useEffect(() => {
+    const sub = Linking.addEventListener('url', (evt) => {
+      linkListenerUrl.current = evt.url;
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Handle cold start deep links
+  useEffect(() => {
+    (async () => {
+      const initial = await Linking.getInitialURL();
+      if (initial) await handleCallbackUrl(initial);
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        const url = window.location.href;
+        await handleCallbackUrl(url);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const extractSessionId = (url: string | null): string | null => {
+    if (!url) return null;
+    const m = url.match(/[?#&]session_id=([^&#]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  };
+
+  const handleCallbackUrl = async (url: string | null) => {
+    const sid = extractSessionId(url);
+    if (!sid || processedSessionIds.current.has(sid)) return;
+    processedSessionIds.current.add(sid);
+    try {
+      setLoading(true);
+      const resp = await apiFetch('/auth/session', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sid }),
+      });
+      await setSession(resp.session_token, resp.user);
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        window.history.replaceState(window.history.state, '', window.location.pathname);
+      }
+      router.replace('/(tabs)/home');
+    } catch (e: any) {
+      setErr(e.message || 'Google login failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogle = async () => {
+    try {
+      setErr('');
+      let redirectUrl: string;
+      if (Platform.OS === 'web') {
+        redirectUrl = window.location.origin + '/auth';
+      } else {
+        redirectUrl = Linking.createURL('auth');
+      }
+      const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+      if (Platform.OS === 'web') {
+        window.location.href = authUrl;
+        return;
+      }
+      linkListenerUrl.current = null;
+      const result: any = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
+      const candidateUrl = result?.url || linkListenerUrl.current || (await Linking.getInitialURL());
+      await handleCallbackUrl(candidateUrl);
+    } catch (e: any) {
+      setErr(e.message || 'Google login failed');
+    }
+  };
+
+  const sendOtp = async () => {
+    if (!/^\d{10}$/.test(phone)) { setErr('Enter valid 10-digit phone'); return; }
+    try {
+      setLoading(true); setErr('');
+      await apiFetch('/auth/phone/send-otp', {
+        method: 'POST',
+        body: JSON.stringify({ phone }),
+      });
+      setMode('otp');
+    } catch (e: any) {
+      setErr(e.message);
+    } finally { setLoading(false); }
+  };
+
+  const verifyOtp = async () => {
+    if (otp.length !== 6) { setErr('Enter 6-digit OTP'); return; }
+    try {
+      setLoading(true); setErr('');
+      const resp = await apiFetch('/auth/phone/verify-otp', {
+        method: 'POST',
+        body: JSON.stringify({ phone, otp, name: name || null }),
+      });
+      await setSession(resp.session_token, resp.user);
+      router.replace('/(tabs)/home');
+    } catch (e: any) {
+      setErr(e.message);
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <View style={styles.root} testID="auth-screen">
+      <LinearGradient
+        colors={['#1a0f00', Colors.surface, Colors.surface]}
+        style={StyleSheet.absoluteFill}
+      />
+      <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={{ flex: 1 }}
+        >
+          <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+            <View style={styles.brandBox}>
+              <View style={styles.logoCircle}>
+                <MaterialCommunityIcons name="target" size={40} color={Colors.brand} />
+              </View>
+              <Text style={styles.brandText}>TRUST100</Text>
+              <Text style={styles.tagline}>PLAY • WIN • WITHDRAW</Text>
+            </View>
+
+            {mode === 'phone' ? (\
+              <View style={styles.form}>
+                <Text style={styles.label}>Phone Number</Text>
+                <TextInput
+                  testID="phone-input"
+                  value={phone}
+                  onChangeText={setPhone}
+                  keyboardType="number-pad"
+                  maxLength={10}
+                  placeholder="10-digit mobile"
+                  placeholderTextColor={Colors.onSurfaceSecondary}
+                  style={styles.input}
+                />
+                <Text style={styles.label}>Name (optional)</Text>
+                <TextInput
+                  testID="name-input"
+                  value={name}
+                  onChangeText={setName}
+                  placeholder="Your gaming name"
+                  placeholderTextColor={Colors.onSurfaceSecondary}
+                  style={styles.input}
+                />
+                {err ? <Text style={styles.error} testID="auth-error">{err}</Text> : null}
+                <Pressable
+                  testID="send-otp-button"
+                  onPress={sendOtp}
+                  style={({ pressed }) => [styles.primaryBtn, pressed && { opacity: 0.85 }]}
+                  disabled={loading}
+                >
+                  {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.primaryBtnText}>SEND OTP</Text>}
+                </Pressable>
+
+                <View style={styles.divider}>
+                  <View style={styles.line} />
+                  <Text style={styles.orText}>OR</Text>
+                  <View style={styles.line} />
+                </View>
+
+                <Pressable testID="google-signin-button" onPress={handleGoogle} style={styles.googleBtn}>
+                  <MaterialCommunityIcons name="google" size={20} color={Colors.onSurface} />
+                  <Text style={styles.googleText}>Continue with Google</Text>
+                </Pressable>
+              </View>
+            ) : (\
+              <View style={styles.form}>
+                <Text style={styles.label}>Enter OTP sent to {phone}</Text>
+                <TextInput
+                  testID="otp-input"
+                  value={otp}
+                  onChangeText={setOtp}
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  placeholder="6-digit OTP"
+                  placeholderTextColor={Colors.onSurfaceSecondary}
+                  style={styles.input}
+                />
+                <Text style={styles.hint}>Mock OTP: 123456</Text>
+                {err ? <Text style={styles.error} testID="auth-error">{err}</Text> : null}
+                <Pressable
+                  testID="verify-otp-button"
+                  onPress={verifyOtp}
+                  style={({ pressed }) => [styles.primaryBtn, pressed && { opacity: 0.85 }]}
+                  disabled={loading}
+                >
+                  {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.primaryBtnText}>VERIFY & LOGIN</Text>}
+                </Pressable>
+                <Pressable onPress={() => { setMode('phone'); setOtp(''); setErr(''); }}>
+                  <Text style={styles.linkText}>Change number</Text>
+                </Pressable>
+              </View>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: Colors.surface },
+  content: { flexGrow: 1, padding: Spacing.lg, justifyContent: 'center' },
+  brandBox: { alignItems: 'center', marginBottom: Spacing.xxl },
+  logoCircle: { width: 88, height: 88, borderRadius: 44, backgroundColor: Colors.brandTertiary, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: Colors.brand, marginBottom: Spacing.md },
+  brandText: { color: Colors.onSurface, fontSize: 36, fontWeight: '800', letterSpacing: 4 },
+  tagline: { color: Colors.brand, fontSize: 12, letterSpacing: 3, marginTop: Spacing.xs, fontWeight: '700' },
+  form: { gap: Spacing.md },
+  label: { color: Colors.onSurfaceSecondary, fontSize: 12, letterSpacing: 1, textTransform: 'uppercase' },
+  input: { backgroundColor: Colors.surfaceSecondary, borderRadius: Radius.md, padding: Spacing.md, color: Colors.onSurface, fontSize: 16, borderWidth: 1, borderColor: Colors.border },
+  primaryBtn: { backgroundColor: Colors.brand, borderRadius: Radius.md, padding: Spacing.lg, alignItems: 'center', marginTop: Spacing.sm },
+  primaryBtnText: { color: Colors.surface, fontWeight: '800', letterSpacing: 2, fontSize: 15 },
+  divider: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, marginVertical: Spacing.md },
+  line: { flex: 1, height: 1, backgroundColor: Colors.border },
+  orText: { color: Colors.onSurfaceSecondary, fontSize: 12 },
+  googleBtn: { flexDirection: 'row', gap: Spacing.md, backgroundColor: Colors.surfaceSecondary, borderRadius: Radius.md, padding: Spacing.lg, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.border },
+  googleText: { color: Colors.onSurface, fontWeight: '600', fontSize: 15 },
+  error: { color: Colors.error, fontSize: 13 },
+  hint: { color: Colors.warning, fontSize: 12 },
+  linkText: { color: Colors.brand, textAlign: 'center', marginTop: Spacing.md },
+});
