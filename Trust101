@@ -1,0 +1,30 @@
+export const Colors = {
+  surface: '#0A0D14',
+  onSurface: '#FFFFFF',
+  surfaceSecondary: '#161B22',
+  onSurfaceSecondary: '#A3B3CC',
+  surfaceTertiary: '#21262D',
+  onSurfaceTertiary: '#C9D1D9',
+  brand: '#FF4D00',
+  brandSecondary: '#FF7B00',
+  brandTertiary: '#2A1810',
+  onBrandTertiary: '#FF6B33',
+  success: '#00E676',
+  warning: '#FFC107',
+  error: '#FF1744',
+  info: '#00B0FF',
+  border: '#30363D',
+  borderStrong: '#484F58',
+  divider: '#21262D',
+};
+
+export const Spacing = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32, xxxl: 48 };
+export const Radius = { sm: 4, md: 8, lg: 12, pill: 999 };
+export const Fonts = {
+  display: 'Rajdhani-SemiBold',
+  displayBold: 'Rajdhani-Bold',
+  text: 'DMSans-Regular',
+  textBold: 'DMSans-Bold',
+};
+
+export const ADMIN_EMAIL = 'sanjaymeena861976@gmail.com';
