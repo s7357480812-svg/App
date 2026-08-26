@@ -1,0 +1,532 @@
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Request
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+import uuid
+import httpx
+from pathlib import Path
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
+from datetime import datetime, timezone, timedelta
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+app = FastAPI(title="TRUST100 API")
+api_router = APIRouter(prefix="/api")
+
+# ---------- Config ----------
+ADMIN_EMAIL = "sanjaymeena861976@gmail.com"
+ADMIN_PHONE = "8619766968"
+UPI_ID = "sanjaymeena861976@ybl"  # display upi id on QR screen
+WHATSAPP_CONTACT = "918619766968"
+TELEGRAM_CONTACT = "trust100support"
+MOCK_OTP = "123456"
+
+COIN_PACKAGES = [
+    {"id": "p10", "coins": 10, "price": 10},
+    {"id": "p20", "coins": 20, "price": 20},
+    {"id": "p30", "coins": 30, "price": 30},
+    {"id": "p40", "coins": 40, "price": 40},
+    {"id": "p50", "coins": 50, "price": 50},
+]
+
+# ---------- Helpers ----------
+def now_utc():
+    return datetime.now(timezone.utc)
+
+def uid(prefix: str = "u"):
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+def clean(doc: Optional[dict]) -> Optional[dict]:
+    if not doc:
+        return doc
+    doc.pop("_id", None)
+    return doc
+
+async def get_user_from_token(authorization: Optional[str]) -> dict:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ", 1)[1].strip()
+    session = await db.sessions.find_one({"session_token": token}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    expires_at = session.get("expires_at")
+    if isinstance(expires_at, datetime):
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < now_utc():
+            raise HTTPException(status_code=401, detail="Session expired")
+    user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+async def require_admin(authorization: Optional[str]) -> dict:
+    user = await get_user_from_token(authorization)
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+async def ensure_user(email: Optional[str], name: Optional[str], picture: Optional[str], phone: Optional[str]) -> dict:
+    query = {}
+    if email:
+        query["email"] = email
+    elif phone:
+        query["phone"] = phone
+    user = await db.users.find_one(query, {"_id": 0}) if query else None
+    is_admin = (email == ADMIN_EMAIL) or (phone == ADMIN_PHONE)
+    if user:
+        updates = {}
+        if is_admin and not user.get("is_admin"):
+            updates["is_admin"] = True
+        if name and not user.get("name"):
+            updates["name"] = name
+        if picture and not user.get("picture"):
+            updates["picture"] = picture
+        if updates:
+            await db.users.update_one({"user_id": user["user_id"]}, {"$set": updates})
+            user.update(updates)
+        return user
+    new_user = {
+        "user_id": uid("usr"),
+        "email": email,
+        "phone": phone,
+        "name": name or (phone or (email.split("@")[0] if email else "Player")),
+        "picture": picture,
+        "coins": 0,
+        "won_coins": 0,
+        "spent_coins": 0,
+        "is_admin": is_admin,
+        "upi_id": None,
+        "created_at": now_utc().isoformat(),
+    }
+    await db.users.insert_one(new_user.copy())
+    return clean(new_user)
+
+async def create_session(user_id: str) -> str:
+    token = f"st_{uuid.uuid4().hex}"
+    session = {
+        "session_token": token,
+        "user_id": user_id,
+        "created_at": now_utc(),
+        "expires_at": now_utc() + timedelta(days=7),
+    }
+    await db.sessions.insert_one(session)
+    return token
+
+# ---------- Models ----------
+class PhoneOTPRequest(BaseModel):
+    phone: str
+
+class PhoneVerifyRequest(BaseModel):
+    phone: str
+    otp: str
+    name: Optional[str] = None
+
+class GoogleSessionRequest(BaseModel):
+    session_id: str
+
+class MatchCreate(BaseModel):
+    title: str
+    game: Literal["BGMI", "FreeFire"]
+    mode: Literal["Solo", "Squad", "LoneWolf"]
+    entry_fee: int
+    per_kill_prize: int
+    max_players: int = 50
+    start_time: str  # ISO string
+    map_name: Optional[str] = None
+
+class MatchUpdateRoom(BaseModel):
+    room_id: str
+    room_password: str
+
+class MatchJoinRequest(BaseModel):
+    game_name: str
+
+class KillUpdate(BaseModel):
+    user_id: str
+    kills: int
+
+class CoinPurchaseRequest(BaseModel):
+    package_id: str
+    screenshot_base64: str  # data URI or raw base64
+    utr: Optional[str] = None
+
+class WithdrawalRequest(BaseModel):
+    amount: int
+    upi_id: str
+
+class VerifyPayment(BaseModel):
+    approve: bool
+    note: Optional[str] = None
+
+class CompleteWithdrawal(BaseModel):
+    approve: bool
+    note: Optional[str] = None
+
+# ---------- Auth ----------
+@api_router.get("/config")
+async def get_config():
+    return {
+        "upi_id": UPI_ID,
+        "admin_email": ADMIN_EMAIL,
+        "whatsapp": WHATSAPP_CONTACT,
+        "telegram": TELEGRAM_CONTACT,
+        "packages": COIN_PACKAGES,
+    }
+
+@api_router.post("/auth/phone/send-otp")
+async def send_otp(payload: PhoneOTPRequest):
+    if not payload.phone or len(payload.phone) < 8:
+        raise HTTPException(400, "Invalid phone")
+    logging.info(f"Mock OTP for {payload.phone}: {MOCK_OTP}")
+    return {"success": True, "message": f"OTP sent. Use {MOCK_OTP} (mock)"}
+
+@api_router.post("/auth/phone/verify-otp")
+async def verify_otp(payload: PhoneVerifyRequest):
+    if payload.otp != MOCK_OTP:
+        raise HTTPException(401, "Invalid OTP")
+    user = await ensure_user(email=None, name=payload.name, picture=None, phone=payload.phone)
+    token = await create_session(user["user_id"])
+    return {"session_token": token, "user": user}
+
+@api_router.post("/auth/session")
+async def google_session(payload: GoogleSessionRequest):
+    async with httpx.AsyncClient(timeout=30.0) as httpc:
+        try:
+            resp = await httpc.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": payload.session_id},
+            )
+        except Exception as e:
+            raise HTTPException(401, f"Auth service error: {e}")
+    if resp.status_code != 200:
+        raise HTTPException(401, "Invalid session")
+    data = resp.json()
+    email = data.get("email")
+    name = data.get("name")
+    picture = data.get("picture")
+    session_token_from_emergent = data.get("session_token")
+    if not email:
+        raise HTTPException(401, "No email in session")
+    user = await ensure_user(email=email, name=name, picture=picture, phone=None)
+    token = session_token_from_emergent or await create_session(user["user_id"])
+    if session_token_from_emergent:
+        await db.sessions.insert_one({
+            "session_token": token,
+            "user_id": user["user_id"],
+            "created_at": now_utc(),
+            "expires_at": now_utc() + timedelta(days=7),
+        })
+    return {"session_token": token, "user": user}
+
+@api_router.get("/auth/me")
+async def me(authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    return user
+
+@api_router.post("/auth/logout")
+async def logout(authorization: Optional[str] = Header(None))):
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+        await db.sessions.delete_one({"session_token": token})
+    return {"success": True}
+
+@api_router.patch("/auth/upi")
+async def set_upi(payload: dict, authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    upi = payload.get("upi_id", "").strip()
+    if not upi:
+        raise HTTPException(400, "UPI required")
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"upi_id": upi}})
+    return {"success": True, "upi_id": upi}
+
+# ---------- Matches ----------
+@api_router.get("/matches")
+async def list_matches(game: Optional[str] = None, status: Optional[str] = None):
+    q = {}
+    if game:
+        q["game"] = game
+    if status:
+        q["status"] = status
+    else:
+        q["status"] = {"$in": ["upcoming", "live"]}
+    matches = await db.matches.find(q, {"_id": 0}).sort("start_time", 1).to_list(200)
+    return matches
+
+@api_router.get("/matches/{match_id}")
+async def get_match(match_id: str, authorization: Optional[str] = Header(None))):
+    match = await db.matches.find_one({"match_id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "Match not found")
+    joined = False
+    my_kills = 0
+    if authorization:
+        try:
+            user = await get_user_from_token(authorization)
+            entry = await db.match_players.find_one(
+                {"match_id": match_id, "user_id": user["user_id"]}, {"_id": 0}
+            )
+            if entry:
+                joined = True
+                my_kills = entry.get("kills", 0)
+        except HTTPException:
+            pass
+    match["joined"] = joined
+    match["my_kills"] = my_kills
+    if not joined:
+        match.pop("room_id", None)
+        match.pop("room_password", None)
+    return match
+
+@api_router.post("/matches/{match_id}/join")
+async def join_match(match_id: str, payload: MatchJoinRequest, authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    match = await db.matches.find_one({"match_id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "Match not found")
+    if match["status"] not in ("upcoming", "live"):
+        raise HTTPException(400, "Match not open")
+    if match.get("players_count", 0) >= match["max_players"]:
+        raise HTTPException(400, "Match is full")
+    existing = await db.match_players.find_one({"match_id": match_id, "user_id": user["user_id"]})
+    if existing:
+        raise HTTPException(400, "Already joined")
+    if user["coins"] < match["entry_fee"]:
+        raise HTTPException(400, "Insufficient coins")
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$inc": {"coins": -match["entry_fee"], "spent_coins": match["entry_fee"]}},
+    )
+    entry = {
+        "player_id": uid("mp"),
+        "match_id": match_id,
+        "user_id": user["user_id"],
+        "user_name": user.get("name"),
+        "game_name": payload.game_name,
+        "kills": 0,
+        "prize": 0,
+        "joined_at": now_utc().isoformat(),
+    }
+    await db.match_players.insert_one(entry.copy())
+    await db.matches.update_one({"match_id": match_id}, {"$inc": {"players_count": 1}})
+    await db.transactions.insert_one({
+        "txn_id": uid("txn"),
+        "user_id": user["user_id"],
+        "type": "match_entry",
+        "amount": -match["entry_fee"],
+        "status": "completed",
+        "meta": {"match_id": match_id, "match_title": match["title"]},
+        "created_at": now_utc().isoformat(),
+    })
+    return {"success": True}
+
+@api_router.get("/matches/{match_id}/players")
+async def match_players(match_id: str, authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    players = await db.match_players.find({"match_id": match_id}, {"_id": 0}).to_list(200)
+    return players
+
+@api_router.get("/my/matches")
+async def my_matches(authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    entries = await db.match_players.find({"user_id": user["user_id"]}, {"_id": 0}).sort("joined_at", -1).to_list(200)
+    results = []
+    for e in entries:
+        m = await db.matches.find_one({"match_id": e["match_id"]}, {"_id": 0})
+        if m:
+            e["match"] = m
+            results.append(e)
+    return results
+
+# ---------- Admin: matches ----------
+@api_router.post("/admin/matches")
+async def admin_create_match(payload: MatchCreate, authorization: Optional[str] = Header(None))):
+    await require_admin(authorization)
+    match = {
+        "match_id": uid("m"),
+        "title": payload.title,
+        "game": payload.game,
+        "mode": payload.mode,
+        "entry_fee": payload.entry_fee,
+        "per_kill_prize": payload.per_kill_prize,
+        "max_players": payload.max_players,
+        "players_count": 0,
+        "start_time": payload.start_time,
+        "map_name": payload.map_name,
+        "room_id": None,
+        "room_password": None,
+        "status": "upcoming",
+        "created_at": now_utc().isoformat(),
+    }
+    await db.matches.insert_one(match.copy())
+    return clean(match)
+
+@api_router.patch("/admin/matches/{match_id}/room")
+async def admin_set_room(match_id: str, payload: MatchUpdateRoom, authorization: Optional[str] = Header(None))):
+    await require_admin(authorization)
+    result = await db.matches.update_one(
+        {"match_id": match_id},
+        {"$set": {"room_id": payload.room_id, "room_password": payload.room_password, "status": "live"}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Match not found")
+    return {"success": True}
+
+@api_router.post("/admin/matches/{match_id}/kills")
+async def admin_update_kills(match_id: str, payload: KillUpdate, authorization: Optional[str] = Header(None))):
+    await require_admin(authorization)
+    match = await db.matches.find_one({"match_id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "Match not found")
+    player = await db.match_players.find_one({"match_id": match_id, "user_id": payload.user_id}, {"_id": 0})
+    if not player:
+        raise HTTPException(404, "Player not in match")
+    prev_prize = player.get("prize", 0)
+    new_prize = payload.kills * match["per_kill_prize"]
+    delta = new_prize - prev_prize
+    await db.match_players.update_one(
+        {"match_id": match_id, "user_id": payload.user_id},
+        {"$set": {"kills": payload.kills, "prize": new_prize}},
+    )
+    if delta != 0:
+        await db.users.update_one(
+            {"user_id": payload.user_id},
+            {"$inc": {"coins": delta, "won_coins": delta}},
+        )
+        await db.transactions.insert_one({
+            "txn_id": uid("txn"),
+            "user_id": payload.user_id,
+            "type": "prize",
+            "amount": delta,
+            "status": "completed",
+            "meta": {"match_id": match_id, "kills": payload.kills, "match_title": match["title"]},
+            "created_at": now_utc().isoformat(),
+        })
+    return {"success": True, "prize": new_prize}
+
+@api_router.post("/admin/matches/{match_id}/complete")
+async def admin_complete_match(match_id: str, authorization: Optional[str] = Header(None))):
+    await require_admin(authorization)
+    await db.matches.update_one({"match_id": match_id}, {"$set": {"status": "completed"}})
+    return {"success": True}
+
+# ---------- Coin purchase / transactions ----------
+@api_router.post("/purchase")
+async def purchase_coins(payload: CoinPurchaseRequest, authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    pkg = next((p for p in COIN_PACKAGES if p["id"] == payload.package_id), None)
+    if not pkg:
+        raise HTTPException(400, "Invalid package")
+    if not payload.screenshot_base64 or len(payload.screenshot_base64) < 30:
+        raise HTTPException(400, "Screenshot required")
+    order = {
+        "purchase_id": uid("pur"),
+        "user_id": user["user_id"],
+        "user_name": user.get("name"),
+        "user_email": user.get("email"),
+        "user_phone": user.get("phone"),
+        "package_id": pkg["id"],
+        "coins": pkg["coins"],
+        "amount": pkg["price"],
+        "screenshot": payload.screenshot_base64,
+        "utr": payload.utr,
+        "status": "pending",
+        "created_at": now_utc().isoformat(),
+    }
+    await db.purchases.insert_one(order.copy())
+    await db.transactions.insert_one({
+        "txn_id": uid("txn"),
+        "user_id": user["user_id"],
+        "type": "purchase",
+        "amount": pkg["coins"],
+        "status": "pending",
+        "meta": {"purchase_id": order["purchase_id"], "amount_paid": pkg["price"]},
+        "created_at": now_utc().isoformat(),
+    })
+    return {"success": True, "purchase_id": order["purchase_id"]}
+
+@api_router.get("/my/purchases")
+async def my_purchases(authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    items = await db.purchases.find(
+        {"user_id": user["user_id"]},
+        {"_id": 0, "screenshot": 0},
+    ).sort("created_at", -1).to_list(200)
+    return items
+
+@api_router.get("/my/transactions")
+async def my_transactions(authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    items = await db.transactions.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return items
+
+# ---------- Withdrawals ----------
+@api_router.post("/withdrawals")
+async def create_withdrawal(payload: WithdrawalRequest, authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    if payload.amount <= 0:
+        raise HTTPException(400, "Invalid amount")
+    if user["coins"] < payload.amount:
+        raise HTTPException(400, "Insufficient coins")
+    await db.users.update_one({"user_id": user["user_id"]}, {"$inc": {"coins": -payload.amount}})
+    if not user.get("upi_id"):
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"upi_id": payload.upi_id}})
+    wd = {
+        "withdrawal_id": uid("wd"),
+        "user_id": user["user_id"],
+        "user_name": user.get("name"),
+        "user_email": user.get("email"),
+        "user_phone": user.get("phone"),
+        "amount": payload.amount,
+        "upi_id": payload.upi_id,
+        "status": "pending",
+        "created_at": now_utc().isoformat(),
+    }
+    await db.withdrawals.insert_one(wd.copy())
+    await db.transactions.insert_one({
+        "txn_id": uid("txn"),
+        "user_id": user["user_id"],
+        "type": "withdrawal",
+        "amount": -payload.amount,
+        "status": "pending",
+        "meta": {"withdrawal_id": wd["withdrawal_id"], "upi_id": payload.upi_id},
+        "created_at": now_utc().isoformat(),
+    })
+    return {"success": True, "withdrawal_id": wd["withdrawal_id"]}
+
+@api_router.get("/my/withdrawals")
+async def my_withdrawals(authorization: Optional[str] = Header(None))):
+    user = await get_user_from_token(authorization)
+    items = await db.withdrawals.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return items
+
+# ---------- Admin ----------
+@api_router.get("/admin/purchases")
+async def admin_purchases(status: str = "pending", authorization: Optional[str] = Header(None))):
+    await require_admin(authorization)
+    items = await db.purchases.find({"status": status}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return items
+
+@api_router.post("/admin/purchases/{purchase_id}/verify")
+async def admin_verify_purchase(purchase_id: str, payload: VerifyPayment, authorization: Optional[str] = Header(None))):
+    await require_admin(authorization)
+    order = await db.purchases.find_one({"purchase_id": purchase_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Not found")
+    if order["status"] != "pending":
+        raise HTTPException(400, "Already processed")
+    if payload.approve:
+        await db.purchases.update_one(
+            {"purchase_id": purchase_id},
+            {"$set": {"status": "approved", "verified_at": now_utc().isoformat(), "note": payload.note}},
+        )
+        await db.users.update_one
