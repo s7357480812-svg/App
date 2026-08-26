@@ -1,0 +1,49 @@
+import Constants from 'expo-constants';
+import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
+export const API_BASE = `${BACKEND_URL}/api`;
+
+const TOKEN_KEY = 'trust100_session_token';
+
+export async function saveToken(token: string) {
+  if (Platform.OS === 'web') {
+    try { window.localStorage.setItem(TOKEN_KEY, token); } catch {}
+  } else {
+    await SecureStore.setItemAsync(TOKEN_KEY, token);
+  }
+}
+
+export async function getToken(): Promise<string | null> {
+  if (Platform.OS === 'web') {
+    try { return window.localStorage.getItem(TOKEN_KEY); } catch { return null; }
+  }
+  return await SecureStore.getItemAsync(TOKEN_KEY);
+}
+
+export async function clearToken() {
+  if (Platform.OS === 'web') {
+    try { window.localStorage.removeItem(TOKEN_KEY); } catch {}
+  } else {
+    await SecureStore.deleteItemAsync(TOKEN_KEY);
+  }
+}
+
+export async function apiFetch(path: string, options: RequestInit = {}) {
+  const token = await getToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> || {}),
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  if (!res.ok) {
+    let msg = 'Request failed';
+    try { const j = await res.json(); msg = j.detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return res.json();
+  return res.text();
+}
