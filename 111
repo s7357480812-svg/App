@@ -1,0 +1,135 @@
+import { View, Text, StyleSheet, ScrollView, Pressable, Linking, Alert } from 'react-native';
+import { useRouter } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { Colors, Spacing, Radius } from '@/src/theme';
+import { useAuth } from '@/src/auth';
+import { useEffect, useState } from 'react';
+import { apiFetch } from '@/src/api';
+
+export default function Profile() {
+  const { user, logout, refresh } = useAuth();
+  const router = useRouter();
+  const [cfg, setCfg] = useState<any>(null);
+
+  useEffect(() => { (async () => { try { setCfg(await apiFetch('/config')); await refresh(); } catch {} })(); }, [refresh]);
+
+  const openWhatsApp = () => {
+    if (!cfg?.whatsapp) return;
+    const url = `https://wa.me/${cfg.whatsapp}?text=${encodeURIComponent('TRUST100 support: ')}`;
+    Linking.openURL(url).catch(() => Alert.alert('Error', 'Could not open WhatsApp'));
+  };
+
+  const openTelegram = () => {
+    if (!cfg?.telegram) return;
+    Linking.openURL(`https://t.me/${cfg.telegram}`).catch(() => Alert.alert('Error', 'Could not open Telegram'));
+  };
+
+  const doLogout = async () => {
+    await logout();
+    router.replace('/auth');
+  };
+
+  return (
+    <View style={styles.root} testID="profile-screen">
+      <SafeAreaView edges={['top']} style={styles.header}>
+        <Text style={styles.title}>PROFILE</Text>
+      </SafeAreaView>
+      <ScrollView contentContainerStyle={styles.content}>
+        <View style={styles.profileCard}>
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{(user?.name || 'P')[0].toUpperCase()}</Text>
+          </View>
+          <Text style={styles.name}>{user?.name || 'Player'}</Text>
+          <Text style={styles.email}>{user?.email || user?.phone}</Text>
+          {user?.is_admin && (
+            <View style={styles.adminBadge}>
+              <MaterialCommunityIcons name="shield-crown" size={14} color={Colors.brand} />
+              <Text style={styles.adminBadgeText}>ADMIN</Text>
+            </View>
+          )}
+        </View>
+
+        <View style={styles.statsGrid}>
+          <Stat label="BALANCE" value={String(user?.coins ?? 0)} icon="hexagon-multiple" />
+          <Stat label="WON" value={String(user?.won_coins ?? 0)} icon="trophy" />
+          <Stat label="SPENT" value={String(user?.spent_coins ?? 0)} icon="fire" />
+        </View>
+
+        {user?.is_admin && (
+          <Pressable testID="admin-panel-btn" onPress={() => router.push('/admin')} style={styles.adminTile}>
+            <MaterialCommunityIcons name="shield-crown" size={28} color={Colors.brand} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.tileTitle}>ADMIN PANEL</Text>
+              <Text style={styles.tileSub}>Manage matches, verify payments, withdrawals</Text>
+            </View>
+            <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.onSurfaceSecondary} />
+          </Pressable>
+        )}
+
+        <Pressable testID="my-matches-tile" onPress={() => router.push('/(tabs)/my-matches')} style={styles.tile}>
+          <MaterialCommunityIcons name="gamepad-variant" size={24} color={Colors.brand} />
+          <Text style={styles.tileTitle}>My Matches</Text>
+          <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.onSurfaceSecondary} style={{ marginLeft: 'auto' }} />
+        </Pressable>
+
+        <Pressable testID="wallet-tile" onPress={() => router.push('/(tabs)/wallet')} style={styles.tile}>
+          <MaterialCommunityIcons name="history" size={24} color={Colors.brand} />
+          <Text style={styles.tileTitle}>Transaction History</Text>
+          <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.onSurfaceSecondary} style={{ marginLeft: 'auto' }} />
+        </Pressable>
+
+        <Text style={styles.sectionLabel}>SUPPORT</Text>
+        <Pressable testID="whatsapp-btn" onPress={openWhatsApp} style={styles.tile}>
+          <MaterialCommunityIcons name="whatsapp" size={24} color="#25D366" />
+          <Text style={styles.tileTitle}>WhatsApp Support</Text>
+          <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.onSurfaceSecondary} style={{ marginLeft: 'auto' }} />
+        </Pressable>
+
+        <Pressable testID="telegram-btn" onPress={openTelegram} style={styles.tile}>
+          <MaterialCommunityIcons name="send" size={24} color="#0088cc" />
+          <Text style={styles.tileTitle}>Telegram Support</Text>
+          <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.onSurfaceSecondary} style={{ marginLeft: 'auto' }} />
+        </Pressable>
+
+        <Pressable testID="logout-btn" onPress={doLogout} style={[styles.tile, { borderColor: Colors.error }]}>
+          <MaterialCommunityIcons name="logout" size={24} color={Colors.error} />
+          <Text style={[styles.tileTitle, { color: Colors.error }]}>Logout</Text>
+        </Pressable>
+      </ScrollView>
+    </View>
+  );
+}
+
+function Stat({ label, value, icon }: { label: string; value: string; icon: any }) {
+  return (
+    <View style={styles.statCard}>
+      <MaterialCommunityIcons name={icon} size={20} color={Colors.brand} />
+      <Text style={styles.statVal}>{value}</Text>
+      <Text style={styles.statLbl}>{label}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: Colors.surface },
+  header: { padding: Spacing.lg, borderBottomWidth: 1, borderBottomColor: Colors.border },
+  title: { color: Colors.onSurface, fontSize: 20, fontWeight: '800', letterSpacing: 2 },
+  content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: Spacing.xxxl },
+  profileCard: { backgroundColor: Colors.surfaceSecondary, borderRadius: Radius.lg, padding: Spacing.lg, alignItems: 'center', borderWidth: 1, borderColor: Colors.border, gap: Spacing.xs },
+  avatar: { width: 72, height: 72, borderRadius: 36, backgroundColor: Colors.brandTertiary, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: Colors.brand },
+  avatarText: { color: Colors.brand, fontSize: 28, fontWeight: '900' },
+  name: { color: Colors.onSurface, fontSize: 20, fontWeight: '800', marginTop: Spacing.sm },
+  email: { color: Colors.onSurfaceSecondary, fontSize: 13 },
+  adminBadge: { flexDirection: 'row', gap: 4, alignItems: 'center', paddingHorizontal: Spacing.sm, paddingVertical: 3, borderRadius: Radius.pill, backgroundColor: Colors.brandTertiary, borderWidth: 1, borderColor: Colors.brand, marginTop: Spacing.sm },
+  adminBadgeText: { color: Colors.brand, fontWeight: '800', fontSize: 10, letterSpacing: 1 },
+  statsGrid: { flexDirection: 'row', gap: Spacing.sm },
+  statCard: { flex: 1, backgroundColor: Colors.surfaceSecondary, borderRadius: Radius.md, padding: Spacing.md, alignItems: 'center', borderWidth: 1, borderColor: Colors.border, gap: 4 },
+  statVal: { color: Colors.onSurface, fontSize: 20, fontWeight: '900' },
+  statLbl: { color: Colors.onSurfaceSecondary, fontSize: 10, letterSpacing: 1 },
+  adminTile: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, padding: Spacing.md, backgroundColor: Colors.brandTertiary, borderRadius: Radius.md, borderWidth: 1, borderColor: Colors.brand },
+  tile: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, padding: Spacing.md, backgroundColor: Colors.surfaceSecondary, borderRadius: Radius.md, borderWidth: 1, borderColor: Colors.border },
+  tileTitle: { color: Colors.onSurface, fontWeight: '700' },
+  tileSub: { color: Colors.onSurfaceSecondary, fontSize: 12, marginTop: 2 },
+  sectionLabel: { color: Colors.onSurfaceSecondary, fontSize: 11, letterSpacing: 2, fontWeight: '700', marginTop: Spacing.md },
+});
