@@ -1,0 +1,193 @@
+import { useEffect, useState, useCallback } from 'react';
+import {
+  View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, ActivityIndicator, Image
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { Colors, Spacing, Radius } from '@/src/theme';
+import { apiFetch } from '@/src/api';
+import { useAuth } from '@/src/auth';
+
+type Match = {
+  match_id: string;
+  title: string;
+  game: 'BGMI' | 'FreeFire';
+  mode: 'Solo' | 'Squad' | 'LoneWolf';
+  entry_fee: number;
+  per_kill_prize: number;
+  max_players: number;
+  players_count: number;
+  start_time: string;
+  status: string;
+};
+
+const GAMES = ['ALL', 'BGMI', 'FreeFire'] as const;
+
+export default function HomeScreen() {
+  const router = useRouter();
+  const { user, refresh } = useAuth();
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<typeof GAMES[number]>('ALL');
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await apiFetch('/matches');
+      setMatches(data);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    (async () => { await load(); setLoading(false); })();
+  }, [load]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await Promise.all([load(), refresh()]);
+    setRefreshing(false);
+  };
+
+  const filtered = filter === 'ALL' ? matches : matches.filter(m => m.game === filter);
+
+  return (
+    <View style={styles.root} testID="home-screen">
+      <SafeAreaView edges={['top']} style={styles.header}>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={styles.hello}>Hi, {user?.name || 'Player'}</Text>
+            <Text style={styles.headline}>TRUST100</Text>
+          </View>
+          <Pressable
+            testID="wallet-header-button"
+            onPress={() => router.push('/(tabs)/wallet')}
+            style={styles.walletPill}
+          >
+            <MaterialCommunityIcons name="hexagon-multiple" size={16} color={Colors.brand} />
+            <Text style={styles.walletCoins}>{user?.coins ?? 0}</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chipRowContent}
+          style={styles.chipRow}
+        >
+          {GAMES.map(g => {
+            const active = filter === g;
+            return (
+              <Pressable
+                key={g}
+                testID={`chip-${g}`}
+                onPress={() => setFilter(g)}
+                style={[styles.chip, active && styles.chipActive]}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>{g}</Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      </SafeAreaView>
+
+      {loading ? (
+        <View style={styles.center}><ActivityIndicator color={Colors.brand} /></View>
+      ) : (
+        <ScrollView
+          contentContainerStyle={styles.list}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.brand} />}
+        >
+          {filtered.length === 0 ? (
+            <View style={styles.center}>
+              <MaterialCommunityIcons name="controller-off" size={48} color={Colors.onSurfaceSecondary} />
+              <Text style={styles.emptyText}>No matches scheduled</Text>
+            </View>
+          ) : filtered.map((m, idx) => (
+            <MatchCard key={m.match_id} match={m} featured={idx === 0} onPress={() => router.push(`/match/${m.match_id}`)} />
+          ))}
+        </ScrollView>
+      )}
+    </View>
+  );
+}
+
+function MatchCard({ match, featured, onPress }: { match: Match; featured?: boolean; onPress: () => void }) {
+  const dt = new Date(match.start_time);
+  const timeStr = dt.toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const initials = match.game === 'BGMI' ? 'BG' : 'FF';
+
+  return (
+    <Pressable testID={`match-card-${match.match_id}`} onPress={onPress} style={[styles.card, featured && styles.cardFeatured]}>
+      {featured && (
+        <LinearGradient
+          colors={['transparent', 'rgba(10,13,20,0.85)', Colors.surface]}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+      )}
+      <View style={styles.cardHeader}>
+        <View style={styles.gameBadge}>
+          <Text style={styles.gameBadgeText}>{initials}</Text>
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.matchTitle} numberOfLines={1}>{match.title}</Text>
+          <Text style={styles.matchMeta}>{match.mode} • {timeStr}</Text>
+        </View>
+        <View style={styles.statusPill}>
+          <View style={[styles.statusDot, { backgroundColor: match.status === 'live' ? Colors.error : Colors.success }]} />
+          <Text style={styles.statusText}>{match.status.toUpperCase()}</Text>
+        </View>
+      </View>
+      <View style={styles.cardStatsRow}>
+        <Stat label="ENTRY" value={`${match.entry_fee}`} icon="hexagon-outline" />
+        <Stat label="PER KILL" value={`₹${match.per_kill_prize}`} icon="skull-outline" />
+        <Stat label="PLAYERS" value={`${match.players_count}/${match.max_players}`} icon="account-group-outline" />
+      </View>
+    </Pressable>
+  );
+}
+
+function Stat({ label, value, icon }: { label: string; value: string; icon: any }) {
+  return (
+    <View style={styles.stat}>
+      <MaterialCommunityIcons name={icon} size={14} color={Colors.brand} />
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: Colors.surface },
+  header: { backgroundColor: Colors.surface, borderBottomWidth: 1, borderBottomColor: Colors.border, paddingHorizontal: Spacing.lg, paddingBottom: Spacing.sm },
+  headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: Spacing.md },
+  hello: { color: Colors.onSurfaceSecondary, fontSize: 12 },
+  headline: { color: Colors.onSurface, fontSize: 22, fontWeight: '800', letterSpacing: 2 },
+  walletPill: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: Colors.brandTertiary, borderColor: Colors.brand, borderWidth: 1, paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm, borderRadius: Radius.pill },
+  walletCoins: { color: Colors.onBrandTertiary, fontWeight: '700' },
+  chipRow: { height: 44 },
+  chipRowContent: { gap: Spacing.sm, paddingHorizontal: 0, alignItems: 'center' },
+  chip: { flexShrink: 0, height: 36, paddingHorizontal: Spacing.lg, borderRadius: Radius.pill, backgroundColor: Colors.surfaceSecondary, borderWidth: 1, borderColor: Colors.border, alignItems: 'center', justifyContent: 'center' },
+  chipActive: { backgroundColor: Colors.brand, borderColor: Colors.brand },
+  chipText: { color: Colors.onSurfaceSecondary, fontWeight: '600', fontSize: 12, letterSpacing: 1 },
+  chipTextActive: { color: Colors.surface },
+  list: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: Spacing.xxxl },
+  card: { backgroundColor: Colors.surfaceSecondary, borderRadius: Radius.lg, padding: Spacing.md, borderWidth: 1, borderColor: Colors.border, overflow: 'hidden' },
+  cardFeatured: { borderColor: Colors.brand },
+  cardHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
+  gameBadge: { width: 44, height: 44, borderRadius: Radius.md, backgroundColor: Colors.brandTertiary, alignItems: 'center', justifyContent: 'center' },
+  gameBadgeText: { color: Colors.brand, fontWeight: '800', fontSize: 14, letterSpacing: 1 },
+  matchTitle: { color: Colors.onSurface, fontWeight: '700', fontSize: 16 },
+  matchMeta: { color: Colors.onSurfaceSecondary, fontSize: 12, marginTop: 2 },
+  statusPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: Spacing.sm, paddingVertical: 4, borderRadius: Radius.pill, backgroundColor: Colors.surfaceTertiary },
+  statusDot: { width: 6, height: 6, borderRadius: 3 },
+  statusText: { color: Colors.onSurfaceSecondary, fontSize: 10, fontWeight: '700' },
+  cardStatsRow: { flexDirection: 'row', gap: Spacing.md, marginTop: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.divider, paddingTop: Spacing.md },
+  stat: { flex: 1, alignItems: 'center', gap: 2 },
+  statValue: { color: Colors.onSurface, fontWeight: '800', fontSize: 15 },
+  statLabel: { color: Colors.onSurfaceSecondary, fontSize: 9, letterSpacing: 1 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.xl, gap: Spacing.md },
+  emptyText: { color: Colors.onSurfaceSecondary },
+});
