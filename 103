@@ -1,0 +1,64 @@
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { apiFetch, clearToken, getToken, saveToken } from './api';
+
+type User = {
+  user_id: string;
+  email?: string | null;
+  phone?: string | null;
+  name?: string | null;
+  picture?: string | null;
+  coins: number;
+  won_coins: number;
+  spent_coins: number;
+  is_admin: boolean;
+  upi_id?: string | null;
+};
+
+type AuthCtx = {
+  user: User | null;
+  loading: boolean;
+  refresh: () => Promise<void>;
+  setSession: (token: string, user: User) => Promise<void>;
+  logout: () => Promise<void>;
+};
+
+const Ctx = createContext<AuthCtx>({} as AuthCtx);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const token = await getToken();
+      if (!token) { setUser(null); return; }
+      const me = await apiFetch('/auth/me');
+      setUser(me);
+    } catch {
+      setUser(null);
+      await clearToken();
+    }
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      await refresh();
+      setLoading(false);
+    })();
+  }, [refresh]);
+
+  const setSession = useCallback(async (token: string, u: User) => {
+    await saveToken(token);
+    setUser(u);
+  }, []);
+
+  const logout = useCallback(async () => {
+    try { await apiFetch('/auth/logout', { method: 'POST' }); } catch {}
+    await clearToken();
+    setUser(null);
+  }, []);
+
+  return <Ctx.Provider value={{ user, loading, refresh, setSession, logout }}>{children}</Ctx.Provider>;
+}
+
+export function useAuth() { return useContext(Ctx); }
